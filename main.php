@@ -26,49 +26,71 @@ $types = [
 	"str" => new str_type_t,
 ];
 
-class service_t {
+abstract class service_t {
 	protected function get_curl_opts() {
 		return [
-			CURLOPT_RETURNTRANSFER => 1,
+			CURLOPT_RETURNTRANSFER => true,
 			CURLOPT_CONNECTTIMEOUT => 1, # all the services are local. Abort on timeout
 			CURLOPT_TIMEOUT => 5,
-			CURLOPT_POST => 1,
 		];
+	}
+
+	protected function get_host() {
+		return "127.0.0.1";
+	}
+
+	abstract protected function get_port();
+	protected function get_url() {
+		return "";
+	}
+
+	protected function get_args() {
+		return [];
 	}
 
 	public function request(array $args) {
 		$curl_opts = $this->get_curl_opts();
-		if (!$curl_opts[CURLOPT_POSTFIELDS])
-			$curl_opts[CURLOPT_POSTFIELDS] = [];
 
-		$curl_opts[CURLOPT_POSTFIELDS] =
-			array_merge($curl_opts[CURLOPT_POSTFIELDS], $args);
-
-		if ($this->curl)
+		if (!$this->curl) {
 			$this->curl = curl_init();
+			curl_setopt_array($this->curl, $curl_opts);
+		}
+
+		$args = http_build_query($args);
+
+		curl_setopt($this->curl, CURLOPT_URL,
+			"http://" . $this->get_host() . ":" . $this->get_port() . "/" . $this->get_url() . "?" . $args);
 
 		$response = curl_exec($this->curl);
-		return $reponse;
+		if (!$response) {
+			trigger_error("Can't call method: " . curl_error($this->curl), E_USER_ERROR);
+			return Null;
+		}
+
+		$decoded = json_decode($response);
+		if (json_last_error() != JSON_ERROR_NONE) {
+			trigger_error("Can't decode response: " . json_last_error_msg(), E_USER_ERROR);
+			return Null;
+		}
+
+		return $decoded;
 	}
 
 	function __destruct() {
 		if ($this->curl)
-			curl_close($this->curl)
+			curl_close($this->curl);
 	}
 }
 
 class test_service_t extends service_t {
-	protected function get_curl_opts() {
-		$opts = parent::get_curl_opts();
-		return array_merge($opts, [
-			CURLOPT_URL => '127.0.0.1:3000',
-		]);
+	protected function get_port() {
+		return "3000";
 	}
 }
 
 $services = [
 	"test" => new test_service_t,
-],
+];
 
 $interface = [
 	"test"		=> [
@@ -87,6 +109,18 @@ $interface = [
 	],
 ];
 
+function call_service($method_name, array $args) {
+	global $interface;
+	global $services;
+	$service = $services[$interface[$method_name]["service"]];
+	if (!$service) {
+		trigger_error("Can't find valid service for method '$method_name'", E_USER_ERROR);
+		return Null;
+	}
+
+	return $service->request($args);
+}
+
 function check_method($method_name, array $args) {
 	global $interface;
 	global $types;
@@ -97,7 +131,7 @@ function check_method($method_name, array $args) {
 		return false;
 	}
 
-	$processed_args = []
+	$processed_args = [];
 	foreach ($expected as $arg_name => $arg_descr) {
 		if (!$args[$arg_name] and $arg_descr["required"]) {
 			trigger_error("Required argument '$arg_name' not found in args list, method '$method_name'", E_USER_ERROR);
@@ -126,14 +160,16 @@ function check_method($method_name, array $args) {
 	foreach ($args as $arg_name => $arg_descr)
 		if (!$processed_args[$arg_name]) {
 			error_log("Unsupported argument '$arg_name' found in method '$method_name'. Skip");
-			unset($processed_args[$arg_name]);
+			unset($args[$arg_name]);
 		}
 
 	return true;
 }
 
 function call_method($method_name, array $args) {
-
+	if (!check_method($method_name, $args))
+		return Null;
+	return call_service($method_name, $args);
 }
 
 function process_method_call($method_name, array $args) {
@@ -144,12 +180,12 @@ function process_method_call($method_name, array $args) {
 
 if (function_exists("add_action")) {
 	foreach ($interface as $method_name => $_) {
-		add_action($method_name, create_function('$args', "process_method_call('$method_name', \$args);"));
+		add_action($method_name, create_function('$args', "return process_method_call('$method_name', \$args);"));
 	}
 } else {
 	# Test mode
-	$method_name = create_function('$args', "process_method_call('test', \$args);");
-	$method_name([ "arg_1" => 123, "arg_2" => "ddd", ]);
+	$method_name = create_function('$args', "return process_method_call('test', \$args);");
+	var_dump($method_name([ "arg_1" => 123, "arg_2" => "ddd", ]));
 }
 
 ?>
